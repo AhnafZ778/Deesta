@@ -1,0 +1,418 @@
+/* ==========================================================================
+   Master Whiteboard - Global Styles (Dark Mode "Linear" Aesthetic)
+   ========================================================================== */
+
+/* --- CSS Reset & Variables --- */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  /* Surface Illumination System (The "Linear" Look) */
+  --surface-0: #0F0F10;  /* Canvas base - Luminance 6% */
+  --surface-1: #151516;  /* Cards/Panels - Luminance 9% */
+  --surface-2: #1E1E20;  /* Floating elements - Luminance 13% */
+  --surface-3: #2A2A2D;  /* Hover states - Luminance 17% */
+  
+  /* Accent Colors */
+  --accent-primary: #6366F1;
+  --accent-success: #22C55E;
+  --accent-warning: #F59E0B;
+  --accent-danger: #EF4444;
+  
+  /* Text Colors */
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+  --text-tertiary: rgba(255, 255, 255, 0.4);
+  
+  /* Borders (Specular Highlights) */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-highlight: rgba(255, 255, 255, 0.1);
+  
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  
+  /* Transitions (Spring Physics approximation in CSS) */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-medium: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* --- Base Styles --- */
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface-0);
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* --- App Container --- */
+.app-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.canvas-container {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  cursor: grab;
+}
+
+.canvas-container:active {
+  cursor: grabbing;
+}
+
+/* --- Zen Mode Overlay --- */
+.zen-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 24px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 100;
+  
+  /* Fade out after 3 seconds */
+  animation: zen-fade 5s ease-in-out forwards;
+}
+
+@keyframes zen-fade {
+  0%, 60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.zen-overlay:hover {
+  animation: none;
+  opacity: 1;
+}
+
+.zen-hint {
+  background: var(--surface-2);
+  border: 1px solid var(--border-highlight);
+  border-radius: 12px;
+  padding: 12px 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.hint-key {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.hint-separator {
+  color: var(--text-tertiary);
+}
+
+.hint-badge {
+  background: rgba(99, 102, 241, 0.2);
+  color: var(--accent-primary);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* --- Scrollbar (Linear Style) --- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface-0);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* --- Selection --- */
+::selection {
+  background: rgba(99, 102, 241, 0.3);
+  color: var(--text-primary);
+}
+
+/* ==========================================================================
+   Zen Mode (Auto-hiding UI)
+   ========================================================================== */
+
+.zen-mode-container {
+  transition: opacity var(--transition-medium);
+}
+
+.zen-mode-container.zen-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.zen-mode-container.zen-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ==========================================================================
+   God Bar (Command Palette)
+   ========================================================================== */
+
+.godbar-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+  z-index: 1000;
+  animation: godbar-overlay-in 150ms ease-out;
+}
+
+@keyframes godbar-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.godbar-container {
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-highlight);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+  overflow: hidden;
+  animation: godbar-container-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes godbar-container-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.godbar-input-wrapper {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 12px;
+}
+
+.godbar-icon {
+  font-size: 18px;
+  color: var(--text-tertiary);
+}
+
+.godbar-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 16px;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+}
+
+.godbar-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.godbar-commands {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.godbar-command {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  gap: 12px;
+  transition: background var(--transition-fast);
+  text-align: left;
+}
+
+.godbar-command:hover,
+.godbar-command.selected {
+  background: var(--surface-2);
+}
+
+.command-icon {
+  font-size: 18px;
+  width: 24px;
+  text-align: center;
+}
+
+.command-name {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.command-shortcut {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  background: var(--surface-0);
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+}
+
+.godbar-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 14px;
+}
+
+.godbar-footer {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-0);
+}
+
+.footer-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+
+/* ==========================================================================
+   Toolbar (Floating Dock)
+   ========================================================================== */
+
+.toolbar-dock {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  z-index: 1000;
+  pointer-events: auto; /* Ensure clickable even if parent is not */
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1), background-color 0.2s;
+}
+
+.toolbar-dock:hover {
+  background: rgba(255, 255, 255, 0.95);
+  transform: translateX(-50%) scale(1.02);
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 24px;
+  background: rgba(0, 0, 0, 0.1);
+  margin: 0 4px;
+}
+
+.tool-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tool-button:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-primary);
+}
+
+.tool-button.active {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent-primary);
+}
+
+.tool-button svg {
+  width: 24px;
+  height: 24px;
+  transition: transform 0.2s;
+}
+
+.tool-button:hover svg {
+  transform: scale(1.1);
+}
+
+.tool-button.active svg {
+  transform: scale(1.1);
+}
+
+.tool-button-indicator {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(99, 102, 241, 0.2);
+  border-radius: 12px;
+  pointer-events: none;
+}
