@@ -6,6 +6,7 @@
 
 import * as Y from 'yjs';
 import { IndexeddbPersistence } from 'y-indexeddb';
+import { WebrtcProvider } from 'y-webrtc';
 
 // --- Card Schema ---
 export interface CardData {
@@ -16,21 +17,47 @@ export interface CardData {
   height: number;
   color: number;
   text: string;
+  imageUrl?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface ConnectionData {
+  id: string;
+  fromId: string;
+  toId: string;
+}
+
+export interface StrokeData {
+  id: string;
+  points: number[][]; // [x, y, pressure]
+  color: number;
+  width: number;
+}
+
+// Combined Snapshot
+export interface BoardData {
+  cards: Map<string, CardData>;
+  connections: Map<string, ConnectionData>;
+  strokes: Map<string, StrokeData>;
 }
 
 // --- Document State ---
 class DocumentStore {
   private doc: Y.Doc;
   private persistence: IndexeddbPersistence | null = null;
+  private provider: WebrtcProvider | null = null;
   private cardsMap: Y.Map<CardData>;
+  private connectionsMap: Y.Map<ConnectionData>;
+  private strokesMap: Y.Map<StrokeData>;
   private isInitialized: boolean = false;
-  private changeListeners: Set<(cards: Map<string, CardData>) => void> = new Set();
+  private changeListeners: Set<(data: BoardData) => void> = new Set();
 
   constructor() {
     this.doc = new Y.Doc();
     this.cardsMap = this.doc.getMap('cards');
+    this.connectionsMap = this.doc.getMap('connections');
+    this.strokesMap = this.doc.getMap('strokes');
   }
 
   /**
@@ -41,6 +68,17 @@ class DocumentStore {
 
     // Create IndexedDB persistence
     this.persistence = new IndexeddbPersistence(boardId, this.doc);
+    
+    // Connect to WebRTC
+    // In a real app, you might want multiple signaling servers for reliability
+    // boardId acts as the "room" name
+    this.provider = new WebrtcProvider(boardId, this.doc, {
+        signaling: ['wss://signaling.yjs.dev', 'wss://y-webrtc-signaling-eu.herokuapp.com', 'wss://y-webrtc-signaling-us.herokuapp.com'],
+    });
+
+    this.provider.on('synced', (synced: { synced: boolean }) => {
+        console.log('[DocumentStore] WebRTC synced:', synced);
+    });
 
     // Wait for sync to complete
     await new Promise<void>((resolve) => {
@@ -51,12 +89,13 @@ class DocumentStore {
     });
 
     // Listen for changes
-    this.cardsMap.observe(() => {
-      this.notifyListeners();
-    });
+    const notify = () => this.notifyListeners();
+    this.cardsMap.observe(notify);
+    this.connectionsMap.observe(notify);
+    this.strokesMap.observe(notify);
 
     this.isInitialized = true;
-    console.log(`[DocumentStore] Initialized with ${this.cardsMap.size} cards`);
+    console.log(`[DocumentStore] Initialized with ${this.cardsMap.size} cards, ${this.connectionsMap.size} connections, ${this.strokesMap.size} strokes`);
   }
 
   /**
@@ -122,14 +161,58 @@ class DocumentStore {
   }
 
   /**
-   * Get all cards
+   * Get all data
+   */
+  getSnapshot(): BoardData {
+    const cards = new Map<string, CardData>();
+    this.cardsMap.forEach((card, id) => cards.set(id, card));
+
+    const connections = new Map<string, ConnectionData>();
+    this.connectionsMap.forEach((conn, id) => connections.set(id, conn));
+
+    const strokes = new Map<string, StrokeData>();
+    this.strokesMap.forEach((stroke, id) => strokes.set(id, stroke));
+
+    return { cards, connections, strokes };
+  }
+
+  /**
+   * Helper for old code calling receive cards
    */
   getAllCards(): Map<string, CardData> {
-    const cards = new Map<string, CardData>();
-    this.cardsMap.forEach((card, id) => {
-      cards.set(id, card);
-    });
-    return cards;
+      return this.getSnapshot().cards;
+  }
+
+  /**
+   * Connection CRUD
+   */
+  createConnection(fromId: string, toId: string): void {
+      const id = `${fromId}-${toId}`;
+      if (this.connectionsMap.has(id)) return;
+      this.doc.transact(() => {
+          this.connectionsMap.set(id, { id, fromId, toId });
+      });
+  }
+
+  deleteConnection(id: string): void {
+      this.doc.transact(() => {
+          this.connectionsMap.delete(id);
+      });
+  }
+
+  /**
+   * Stroke CRUD
+   */
+  addStroke(stroke: StrokeData): void {
+      this.doc.transact(() => {
+          this.strokesMap.set(stroke.id, stroke);
+      });
+  }
+
+  deleteStroke(id: string): void {
+      this.doc.transact(() => {
+          this.strokesMap.delete(id);
+      });
   }
 
   /**
@@ -140,12 +223,12 @@ class DocumentStore {
   }
 
   /**
-   * Subscribe to card changes
+   * Subscribe to document changes
    */
-  subscribe(listener: (cards: Map<string, CardData>) => void): () => void {
+  subscribe(listener: (data: BoardData) => void): () => void {
     this.changeListeners.add(listener);
     // Immediately notify with current state
-    listener(this.getAllCards());
+    listener(this.getSnapshot());
     
     return () => {
       this.changeListeners.delete(listener);
@@ -153,9 +236,9 @@ class DocumentStore {
   }
 
   private notifyListeners(): void {
-    const cards = this.getAllCards();
+    const data = this.getSnapshot();
     for (const listener of this.changeListeners) {
-      listener(cards);
+      listener(data);
     }
   }
 
@@ -166,6 +249,16 @@ class DocumentStore {
     return this.doc;
   }
 
+  updateAwareness(state: { x: number; y: number; color: number; name: string }): void {
+      if (this.provider) {
+          this.provider.awareness.setLocalState(state);
+      }
+  }
+  
+  getAwareness(): any {
+      return this.provider ? this.provider.awareness : null;
+  }
+
   /**
    * Destroy the document store
    */
@@ -173,6 +266,10 @@ class DocumentStore {
     if (this.persistence) {
       this.persistence.destroy();
       this.persistence = null;
+    }
+    if (this.provider) {
+        this.provider.destroy();
+        this.provider = null;
     }
     this.doc.destroy();
     this.changeListeners.clear();

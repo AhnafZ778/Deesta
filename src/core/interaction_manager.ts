@@ -15,6 +15,7 @@ export const InteractionMode = {
   SELECTING: 'selecting',
   DRAWING: 'drawing',
   ERASING: 'erasing',
+  CONNECTING: 'connecting',
   EDITING: 'editing',
 } as const;
 
@@ -35,6 +36,12 @@ export class InteractionManager {
   
   // State Subscriptions
   private listeners: Set<(mode: InteractionMode) => void> = new Set();
+
+  // Rubber Band Selection
+  private dragStart: { x: number; y: number } | null = null;
+
+  // Connection State
+  private connectionStartId: string | null = null;
   
   constructor() {
     this.setupGlobalListeners();
@@ -86,6 +93,14 @@ export class InteractionManager {
           case 'p':
             this.setMode(InteractionMode.DRAWING);
             this.engine?.setCursor('crosshair');
+            break;
+          case 'e':
+            this.setMode(InteractionMode.ERASING);
+            this.engine?.setCursor('crosshair');
+            break;
+          case 'c':
+            this.setMode(InteractionMode.CONNECTING);
+            this.engine?.setCursor('alias'); 
             break;
           case 'v':
             this.setMode(InteractionMode.IDLE);
@@ -158,9 +173,41 @@ export class InteractionManager {
     if (this.mode === InteractionMode.IDLE) {
       // Click on empty space -> Deselect all
       this.deselectAll();
-      // Start rubber band selection (TODO)
+      // Start rubber band selection
       this.setMode(InteractionMode.SELECTING);
+      this.dragStart = { x: e.globalX, y: e.globalY };
     }
+  }
+
+  handleGlobalMove(e: FederatedPointerEvent): void {
+      if (this.mode === InteractionMode.SELECTING && this.dragStart && this.engine) {
+          const currentX = e.globalX;
+          const currentY = e.globalY;
+          
+          // Convert both to world coordinates
+          const worldContainer = this.engine.getWorldContainer();
+          const startLocal = worldContainer.toLocal(this.dragStart);
+          const currentLocal = worldContainer.toLocal({ x: currentX, y: currentY });
+          
+          const x = Math.min(startLocal.x, currentLocal.x);
+          const y = Math.min(startLocal.y, currentLocal.y);
+          const width = Math.abs(currentLocal.x - startLocal.x);
+          const height = Math.abs(currentLocal.y - startLocal.y);
+          
+          this.engine.updateSelectionBox(x, y, width, height);
+          
+          const intersectedIds = this.engine.getCardsInRect(x, y, width, height);
+          this.selectedCardIds = new Set(intersectedIds);
+          this.engine.updateSelectionVisuals(this.selectedCardIds);
+      }
+  }
+
+  handleGlobalUp(_e: FederatedPointerEvent): void {
+      if (this.mode === InteractionMode.SELECTING) {
+          this.setMode(InteractionMode.IDLE);
+          this.dragStart = null;
+          this.engine?.clearSelectionBox();
+      }
   }
 
   /**
@@ -193,9 +240,25 @@ export class InteractionManager {
     }
     this.selectCard(cardId);
 
+    if (this.mode === InteractionMode.CONNECTING) {
+        this.connectionStartId = cardId;
+        console.log(`[InteractionManager] Connection started from ${cardId}`);
+        return;
+    }
+
     // Start dragging
     this.setMode(InteractionMode.DRAGGING);
-    this.engine?.startDrag(e, cardId);
+    this.engine?.startDrag(e, cardId, this.selectedCardIds);
+  }
+
+  handleCardUp(_e: FederatedPointerEvent, cardId: string): void {
+      if (this.mode === InteractionMode.CONNECTING && this.connectionStartId) {
+          if (this.connectionStartId !== cardId) {
+              console.log(`[InteractionManager] Connecting ${this.connectionStartId} -> ${cardId}`);
+              this.engine?.createConnection(this.connectionStartId, cardId);
+          }
+          this.connectionStartId = null;
+      }
   }
 
   /**

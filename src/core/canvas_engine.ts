@@ -4,8 +4,10 @@
  * with custom Verlet physics for smooth, mass-based interactions.
  */
 
-import { Application, Container, Graphics, FederatedPointerEvent, Text, TextStyle } from 'pixi.js';
+import { Application, Container, Graphics, FederatedPointerEvent, Text, TextStyle, Sprite } from 'pixi.js';
 import { interactionManager, InteractionMode } from './interaction_manager';
+import { Quadtree, type Rect } from '../utils/quadtree';
+import { GridSystem } from './grid_system';
 
 
 // --- Physics Configuration (The "Muse" Feel) ---
@@ -26,6 +28,8 @@ interface PhysicsState {
   targetX: number;
   targetY: number;
   isDragging: boolean;
+  dragOffsetX: number;
+  dragOffsetY: number;
   cardId: string;
 }
 
@@ -47,8 +51,18 @@ interface StrokeState {
   graphics: Graphics;
 }
 
+// Connection State
+interface Connection {
+  id: string;
+  fromId: string;
+  toId: string;
+}
+
 // Callback for position changes (for persistence)
 type PositionChangeCallback = (cardId: string, x: number, y: number) => void;
+type ConnectionCreatedCallback = (fromId: string, toId: string) => void;
+type StrokeFinishedCallback = (id: string, points: number[][]) => void;
+type StrokeDeletedCallback = (id: string) => void;
 
 export class CanvasEngine {
   private app: Application;
@@ -56,14 +70,33 @@ export class CanvasEngine {
   private viewport: ViewportState;
   private isInitialized: boolean = false;
   private cards: Map<string, { graphics: Graphics; state: PhysicsState }> = new Map();
+  private connections: Map<string, Connection> = new Map();
   private strokes: StrokeState[] = []; // Track all strokes
-  private onPositionChange: PositionChangeCallback | null = null;
+  private selectionGraphics: Graphics = new Graphics(); 
+  private connectionsGraphics: Graphics = new Graphics();
+  private cursorContainer: Container = new Container();
+  private remoteCursors: Map<number, Graphics> = new Map();
   
-  // Drag offset for current operation
-  private dragOffset: { x: number; y: number } = { x: 0, y: 0 };
+  // Spatial Index
+  private strokeQuadtree: Quadtree<any>;
+  private cardQuadtree: Quadtree<any>;
+  
+  private gridSystem: GridSystem;
+  
+  // Callbacks
+  private onPositionChange: PositionChangeCallback | null = null;
+  private onConnectionCreated: ConnectionCreatedCallback | null = null;
+  private onStrokeFinished: StrokeFinishedCallback | null = null;
+  private onStrokeDeleted: StrokeDeletedCallback | null = null;
+  private onCursorMove: ((x: number, y: number) => void) | null = null;
+  private onRequestCreateCard: ((x: number, y: number, imageUrl?: string) => void) | null = null;
   
   // Current drawing stroke
   private currentStroke: StrokeState | null = null;
+
+  getWorldContainer(): Container {
+    return this.worldContainer;
+  }
 
   constructor() {
     this.app = new Application();
@@ -72,6 +105,13 @@ export class CanvasEngine {
       x: 0, y: 0, scale: 1, vx: 0, vy: 0,
       isDragging: false, lastPointerX: 0, lastPointerY: 0,
     };
+    
+    const worldBounds = { x: -50000, y: -50000, width: 100000, height: 100000 };
+    this.strokeQuadtree = new Quadtree(worldBounds);
+    this.cardQuadtree = new Quadtree(worldBounds);
+    
+    this.gridSystem = new GridSystem();
+    
     (window as any).canvasEngine = this;
   }
 
@@ -88,6 +128,13 @@ export class CanvasEngine {
     });
 
     container.appendChild(this.app.canvas);
+    this.selectionGraphics = new Graphics();
+    this.connectionsGraphics = new Graphics();
+    this.worldContainer.addChild(this.connectionsGraphics);
+    this.worldContainer.addChild(this.selectionGraphics);
+    this.worldContainer.addChild(this.cursorContainer);
+    
+    this.app.stage.addChild(this.gridSystem.getContainer());
     this.app.stage.addChild(this.worldContainer);
     this.setupInteraction();
     this.app.ticker.add(this.physicsTick.bind(this));
@@ -105,14 +152,68 @@ export class CanvasEngine {
       interactionManager.handleCanvasDown(e);
     });
 
+    // Native Drag & Drop for Images
+    const canvas = this.app.canvas;
+    canvas.addEventListener('dragover', (e) => {
+        e.preventDefault(); // allow dropping
+    });
+    
+    canvas.addEventListener('drop', (e) => {
+        e.preventDefault();
+        
+        if (e.dataTransfer && e.dataTransfer.files) {
+            const files = Array.from(e.dataTransfer.files);
+            const imageFiles = files.filter(f => f.type.startsWith('image/'));
+            
+            imageFiles.forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const dataUrl = event.target?.result as string;
+                    if (dataUrl) {
+                        // Create card at drop position?
+                        // e.clientX is screen pos.
+                        const rect = canvas.getBoundingClientRect();
+                        const x = e.clientX - rect.left;
+                        const y = e.clientY - rect.top;
+                        
+                        const localPos = this.worldContainer.toLocal({ x, y });
+                        
+                        // We need to trigger connection event or direct store call?
+                        // Current architecture: CanvasEngine just calls callbacks.
+                        // But createCard doesn't trigger "cardCreated" callback yet...
+                        // We usually create via App -> DocumentStore -> CanvasEngine.
+                        // BUT, here the event starts in CanvasEngine (UI).
+                        
+                        // We should expose a callback "onRequestCreateCard"?
+                        // Or just modify App.tsx to handle the drop on container?
+                        
+                        // Easier: Dispatch a custom event or callback.
+                        if (this.onRequestCreateCard) {
+                            this.onRequestCreateCard(localPos.x, localPos.y, dataUrl);
+                        }
+                    }
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+    });
+
     // Delegated Global Move
     stage.on('globalpointermove', (e: FederatedPointerEvent) => {
+       interactionManager.handleGlobalMove(e);
+
        const mode = interactionManager.getMode();
 
        // Eraser
        if (mode === InteractionMode.ERASING && e.buttons === 1) { // Check for left click drag
            this.eraseAt(e.globalX, e.globalY);
            return;
+       }
+
+       // Broadcast cursor position (World Coordinates)
+       if (this.onCursorMove) {
+           const localPos = this.worldContainer.toLocal(e.global);
+           this.onCursorMove(localPos.x, localPos.y);
        }
 
        // Drawing
@@ -134,11 +235,12 @@ export class CanvasEngine {
       }
       
       // Card Dragging Logic
+      const localMousePos = this.worldContainer.toLocal(e.global);
+      
       for (const [_cardId, { state, graphics }] of this.cards) {
          if (state.isDragging) {
-            const localPos = this.worldContainer.toLocal(e.global);
-            const newX = localPos.x - this.dragOffset.x;
-            const newY = localPos.y - this.dragOffset.y;
+            const newX = localMousePos.x - state.dragOffsetX;
+            const newY = localMousePos.y - state.dragOffsetY;
 
             // Calculate throw velocity
             state.vx = (newX - state.x) / PHYSICS_CONFIG.mass;
@@ -146,8 +248,11 @@ export class CanvasEngine {
 
             state.x = newX;
             state.y = newY;
-            state.targetX = newX;
-            state.targetY = newY;
+            
+            // Snap to Grid (50px)
+            const gridSize = 50;
+            state.targetX = Math.round(newX / gridSize) * gridSize;
+            state.targetY = Math.round(newY / gridSize) * gridSize;
             
             graphics.x = state.x;
             graphics.y = state.y;
@@ -157,6 +262,8 @@ export class CanvasEngine {
 
     // Pointer Up
     const onUp = (e: FederatedPointerEvent) => {
+      interactionManager.handleGlobalUp(e);
+
       // End Drawing
       if (this.currentStroke) {
         this.endStroke(e);
@@ -213,6 +320,10 @@ export class CanvasEngine {
     // Track the new stroke
     this.strokes.push(this.currentStroke);
     
+    // Assign an ID locally immediately
+    const strokeId = crypto.randomUUID();
+    (this.currentStroke as any).id = strokeId;
+    
     // Initial render
     this.renderStroke(this.currentStroke);
   }
@@ -255,7 +366,29 @@ export class CanvasEngine {
        this.currentStroke.points.push([p[0]+0.1, p[1]+0.1, p[2]]);
     }
     this.renderStroke(this.currentStroke);
+    
+    if (this.onStrokeFinished) {
+        this.onStrokeFinished((this.currentStroke as any).id, this.currentStroke.points);
+    }
+    
+    // Index the stroke
+    const bounds = this.getStrokeBounds(this.currentStroke);
+    this.strokeQuadtree.insert({ id: (this.currentStroke as any).id, stroke: this.currentStroke }, bounds);
+
     this.currentStroke = null;
+  }
+  
+  private getStrokeBounds(stroke: StrokeState): Rect {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // Add some padding for width
+    const padding = 20; 
+    for (const p of stroke.points) {
+        if (p[0] < minX) minX = p[0];
+        if (p[1] < minY) minY = p[1];
+        if (p[0] > maxX) maxX = p[0];
+        if (p[1] > maxY) maxY = p[1];
+    }
+    return { x: minX - padding, y: minY - padding, width: maxX - minX + padding * 2, height: maxY - minY + padding * 2 };
   }
 
   /**
@@ -318,6 +451,14 @@ export class CanvasEngine {
     this.worldContainer.x = this.viewport.x;
     this.worldContainer.y = this.viewport.y;
     this.worldContainer.scale.set(this.viewport.scale);
+    
+    this.gridSystem.update(
+        this.viewport.x, 
+        this.viewport.y, 
+        this.viewport.scale, 
+        this.app.screen.width, 
+        this.app.screen.height
+    );
 
     // Card Physics
     for (const [_cardId, { graphics, state }] of this.cards) {
@@ -338,6 +479,7 @@ export class CanvasEngine {
         graphics.y = state.y;
       }
     }
+    this.renderConnections();
   }
 
   updateSelectionVisuals(selectedIds: Set<string>): void {
@@ -408,26 +550,112 @@ export class CanvasEngine {
     this.viewport.lastPointerY = e.globalY;
   }
 
-  startDrag(e: FederatedPointerEvent, cardId: string): void {
-    const card = this.cards.get(cardId);
-    if (!card) return;
-
-    const state = card.state;
-    state.isDragging = true;
-    state.vx = 0;
-    state.vy = 0;
-    card.graphics.cursor = 'grabbing';
+  startDrag(e: FederatedPointerEvent, cardId: string, selectedIds?: Set<string>): void {
+    const targets = new Set<string>();
+    
+    // If the clicked card is part of the selection, drag all selected cards
+    if (selectedIds && selectedIds.has(cardId)) {
+        selectedIds.forEach(id => targets.add(id));
+    } else {
+        // Otherwise only drag the clicked card
+        targets.add(cardId);
+    }
 
     const localPos = this.worldContainer.toLocal(e.global);
-    this.dragOffset.x = localPos.x - state.x;
-    this.dragOffset.y = localPos.y - state.y;
+
+    for (const id of targets) {
+        const card = this.cards.get(id);
+        if (card) {
+            const state = card.state;
+            state.isDragging = true;
+            state.vx = 0;
+            state.vy = 0;
+            card.graphics.cursor = 'grabbing';
+            // Calculate offset for each card relative to the SINGLE mouse pointer
+            state.dragOffsetX = localPos.x - state.x;
+            state.dragOffsetY = localPos.y - state.y;
+        }
+    }
   }
 
   setOnPositionChange(callback: PositionChangeCallback): void {
     this.onPositionChange = callback;
   }
+  
+  setPersistenceCallbacks(callbacks: {
+      onConnectionCreated: ConnectionCreatedCallback;
+      onStrokeFinished: StrokeFinishedCallback;
+      onStrokeDeleted: StrokeDeletedCallback;
+  }): void {
+      this.onConnectionCreated = callbacks.onConnectionCreated;
+      this.onStrokeFinished = callbacks.onStrokeFinished;
+      this.onStrokeDeleted = callbacks.onStrokeDeleted;
+  }
+  
+  setOnCursorMove(callback: (x: number, y: number) => void): void {
+      this.onCursorMove = callback;
+  }
 
-  createCard(cardId: string, x: number, y: number, color: number = 0xFFE066, textContent: string = ''): Graphics {
+  setOnRequestCreateCard(callback: (x: number, y: number, imageUrl?: string) => void): void {
+      this.onRequestCreateCard = callback;
+  }
+
+  /**
+   * Hydrate from persistence
+   */
+  hydrate(cards: any[], connections: any[], strokes: any[]): void {
+      // 1. Cards
+      const incomingCardIds = new Set(cards.map(c => c.id));
+      for (const id of this.cards.keys()) {
+          if (!incomingCardIds.has(id)) this.removeCard(id);
+      }
+      for (const c of cards) {
+           const existing = this.cards.get(c.id);
+           if (!existing) {
+               this.createCard(c.id, c.x, c.y, c.color, c.text, c.imageUrl);
+           } else {
+               if (!existing.state.isDragging) {
+                   this.updateCardPosition(c.id, c.x, c.y);
+               }
+               this.updateCardText(c.id, c.text);
+           }
+      }
+
+      // 2. Connections
+      const incomingConnIds = new Set(connections.map(c => c.id));
+      for (const id of this.connections.keys()) {
+          if (!incomingConnIds.has(id)) this.connections.delete(id);
+      }
+      for (const c of connections) {
+          if (!this.connections.has(c.id)) {
+              this.connections.set(c.id, { id: c.id, fromId: c.fromId, toId: c.toId });
+          }
+      }
+
+      // 3. Strokes
+      const incomingStrokeIds = new Set(strokes.map(s => s.id));
+      for (let i = this.strokes.length - 1; i >= 0; i--) {
+          const s = this.strokes[i] as any;
+          if (s.id && !incomingStrokeIds.has(s.id)) {
+              this.worldContainer.removeChild(s.graphics);
+              s.graphics.destroy();
+              this.strokes.splice(i, 1);
+          }
+      }
+      const existingStrokeIds = new Set(this.strokes.map(s => (s as any).id));
+      for (const s of strokes) {
+          if (!existingStrokeIds.has(s.id)) {
+              const graphics = new Graphics();
+              this.worldContainer.addChild(graphics);
+              const strokeState: StrokeState = { points: s.points, graphics };
+              (strokeState as any).id = s.id;
+              this.renderStroke(strokeState);
+              this.strokes.push(strokeState);
+          }
+      }
+  }
+
+  createCard(cardId: string, x: number, y: number, color: number = 0xFFE066, textContent: string = '', imageUrl?: string): Graphics {
     if (this.cards.has(cardId)) return this.cards.get(cardId)!.graphics;
 
     const graphics = new Graphics();
@@ -438,6 +666,29 @@ export class CanvasEngine {
     graphics.y = y;
     graphics.eventMode = 'static';
     graphics.cursor = 'grab';
+
+    // Image Handling
+    if (imageUrl) {
+        // Create a mask for rounded corners
+        const mask = new Graphics();
+        mask.roundRect(0, 0, 200, 150, 12);
+        mask.fill(0xFFFFFF);
+        graphics.addChild(mask);
+
+        // Load texture
+        const sprite = Sprite.from(imageUrl);
+        sprite.mask = mask;
+        
+        // Wait for texture to load to correct aspect ratio
+        if (sprite.texture.label === 'EMPTY') { // Check if not immediately available
+             sprite.texture.source.on('update', () => {
+                 this.fitSprite(sprite, 200, 150);
+             });
+        } else {
+            this.fitSprite(sprite, 200, 150);
+        }
+        graphics.addChild(sprite);
+    }
 
     const style = new TextStyle({
       fontFamily: 'Inter, sans-serif',
@@ -457,7 +708,11 @@ export class CanvasEngine {
     graphics.addChild(text);
 
     const state: PhysicsState = {
-      x, y, vx: 0, vy: 0, targetX: x, targetY: y, isDragging: false, cardId,
+      x, y, vx: 0, vy: 0, targetX: x, targetY: y, 
+      isDragging: false, 
+      dragOffsetX: 0, 
+      dragOffsetY: 0,
+      cardId,
     };
 
     this.cards.set(cardId, { graphics, state });
@@ -466,8 +721,40 @@ export class CanvasEngine {
         interactionManager.handleCardDown(e, cardId);
     });
 
+    graphics.on('pointerup', (e: FederatedPointerEvent) => {
+        interactionManager.handleCardUp(e, cardId);
+    });
+
     this.worldContainer.addChild(graphics);
+    
+    // Index Card
+    this.cardQuadtree.insert(
+        { id: cardId }, 
+        { x, y, width: 200, height: 150 }
+    );
+    
     return graphics;
+  }
+
+  private fitSprite(sprite: Sprite, width: number, height: number): void {
+      const texture = sprite.texture;
+      if (!texture) return;
+      
+      const ratio = texture.width / texture.height;
+      const targetRatio = width / height;
+      
+      // "Cover" behavior
+      if (ratio > targetRatio) {
+          sprite.height = height;
+          sprite.width = height * ratio;
+      } else {
+          sprite.width = width;
+          sprite.height = width / ratio;
+      }
+      
+      // Center it
+      sprite.x = (width - sprite.width) / 2;
+      sprite.y = (height - sprite.height) / 2;
   }
 
   updateCardPosition(cardId: string, x: number, y: number): void {
@@ -475,6 +762,10 @@ export class CanvasEngine {
     if (card && !card.state.isDragging) {
       card.state.targetX = x;
       card.state.targetY = y;
+      
+      // Update Index
+      this.cardQuadtree.remove(cardId);
+      this.cardQuadtree.insert({ id: cardId }, { x, y, width: 200, height: 150 });
     }
   }
 
@@ -525,31 +816,145 @@ export class CanvasEngine {
 
   eraseAt(x: number, y: number): void {
       const localPos = this.worldContainer.toLocal({ x, y });
-      const radius = 10; // Eraser radius
+      const radius = 20; 
+      
+      const searchBounds = { 
+          x: localPos.x - radius, 
+          y: localPos.y - radius, 
+          width: radius * 2, 
+          height: radius * 2 
+      };
 
-      // Iterate backwards to erase top-most strokes first
-      for (let i = this.strokes.length - 1; i >= 0; i--) {
-          const stroke = this.strokes[i];
+      const candidates: { id: string, stroke: StrokeState }[] = [];
+      this.strokeQuadtree.retrieve(candidates, searchBounds);
+      
+      // We want to remove top-most first, which usually means last drawn.
+      // Candidates from quadtree might not be ordered.
+      // But we can just process all hits. If we want "erase one by one", that's different.
+      // Current behavior implies erasing everything under cursor.
+      
+      const hits: string[] = [];
+
+      for (const item of candidates) {
+          const stroke = item.stroke;
           const points = stroke.points;
           let hit = false;
           
-          // Simple proximity check against points
-          // A better approach is segment-point distance
           for (let j = 0; j < points.length - 1; j++) {
              const p1 = points[j];
              const p2 = points[j + 1];
-             if (this.distToSegment(localPos.x, localPos.y, p1[0], p1[1], p2[0], p2[1]) < radius) {
+             const dist = this.distToSegment(localPos.x, localPos.y, p1[0], p1[1], p2[0], p2[1]);
+             if (dist < radius) {
                  hit = true;
                  break;
              }
           }
-
+          
           if (hit) {
-              // Remove stroke
-              this.worldContainer.removeChild(stroke.graphics);
-              stroke.graphics.destroy();
-              this.strokes.splice(i, 1);
-              // Break? or continue erasing "through" layers? Let's erase through.
+              const strokeId = (stroke as any).id;
+              if (strokeId && !hits.includes(strokeId)) {
+                  hits.push(strokeId);
+              }
+          }
+      }
+      
+      for(const id of hits) {
+          if (this.onStrokeDeleted) {
+               this.onStrokeDeleted(id);
+          }
+          
+          // Remove from Quadtree
+          this.strokeQuadtree.remove(id);
+          
+          // Remove from local array and scene
+          const idx = this.strokes.findIndex(s => (s as any).id === id);
+          if (idx !== -1) {
+              const s = this.strokes[idx];
+              this.worldContainer.removeChild(s.graphics);
+              s.graphics.destroy();
+              this.strokes.splice(idx, 1);
+          }
+      }
+  }
+
+  updateSelectionBox(x: number, y: number, width: number, height: number): void {
+      this.selectionGraphics.clear();
+      this.selectionGraphics.rect(x, y, width, height);
+      this.selectionGraphics.fill({ color: 0x6366F1, alpha: 0.1 }); // Blue transparent
+      this.selectionGraphics.stroke({ color: 0x6366F1, width: 1 });
+  }
+
+  clearSelectionBox(): void {
+      this.selectionGraphics.clear();
+  }
+
+  getCardsInRect(x: number, y: number, width: number, height: number): string[] {
+      const found: string[] = [];
+      // Normalize rect
+      const rx = width < 0 ? x + width : x;
+      const ry = height < 0 ? y + height : y;
+      const rw = Math.abs(width);
+      const rh = Math.abs(height);
+      
+      const candidates: { id: string }[] = [];
+      this.cardQuadtree.retrieve(candidates, { x: rx, y: ry, width: rw, height: rh });
+
+      for (const { id } of candidates) {
+          const card = this.cards.get(id);
+          if (card) {
+               // Simple AABB collision
+              // Card size is fixed 200x150 for now
+              const cw = 200;
+              const ch = 150;
+              const state = card.state;
+              
+              if (state.x < rx + rw &&
+                  state.x + cw > rx &&
+                  state.y < ry + rh &&
+                  state.y + ch > ry) {
+                  found.push(id);
+              }
+          }
+      }
+      return found;
+  }
+
+  createConnection(fromId: string, toId: string): void {
+      const id = `${fromId}-${toId}`;
+      if (this.connections.has(id)) return;
+      this.connections.set(id, { id, fromId, toId });
+      
+      if (this.onConnectionCreated) {
+          this.onConnectionCreated(fromId, toId);
+      }
+  }
+
+  private renderConnections(): void {
+      this.connectionsGraphics.clear();
+      for (const connection of this.connections.values()) {
+          const fromCard = this.cards.get(connection.fromId);
+          const toCard = this.cards.get(connection.toId);
+          if (fromCard && toCard) {
+              const startX = fromCard.state.x + 100;
+              const startY = fromCard.state.y + 75;
+              const endX = toCard.state.x + 100; // Center
+              const endY = toCard.state.y + 75;
+              
+              this.connectionsGraphics.moveTo(startX, startY);
+              this.connectionsGraphics.lineTo(endX, endY);
+              this.connectionsGraphics.stroke({ color: 0x9CA3AF, width: 2, alpha: 0.6 });
+              
+              // Arrowhead
+              const midX = (startX + endX) / 2;
+              const midY = (startY + endY) / 2;
+              const angle = Math.atan2(endY - startY, endX - startX);
+              const headlen = 10;
+              
+              this.connectionsGraphics.moveTo(midX, midY);
+              this.connectionsGraphics.lineTo(midX - headlen * Math.cos(angle - Math.PI / 6), midY - headlen * Math.sin(angle - Math.PI / 6));
+              this.connectionsGraphics.moveTo(midX, midY);
+              this.connectionsGraphics.lineTo(midX - headlen * Math.cos(angle + Math.PI / 6), midY - headlen * Math.sin(angle + Math.PI / 6));
+              this.connectionsGraphics.stroke({ color: 0x9CA3AF, width: 2, alpha: 0.6 });
           }
       }
   }
@@ -560,6 +965,53 @@ export class CanvasEngine {
       let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
       t = Math.max(0, Math.min(1, t));
       return Math.sqrt((px - (x1 + t * (x2 - x1))) ** 2 + (py - (y1 + t * (y2 - y1))) ** 2);
+  }
+
+  setupAwareness(awareness: any): void {
+      if (!awareness) return;
+      
+      awareness.on('change', (changes: any) => {
+          const states = awareness.getStates();
+          
+          // Remove disconnected users
+          changes.removed.forEach((clientId: number) => {
+              const cursor = this.remoteCursors.get(clientId);
+              if (cursor) {
+                  this.cursorContainer.removeChild(cursor);
+                  cursor.destroy();
+                  this.remoteCursors.delete(clientId);
+              }
+          });
+
+          // Update added/updated users
+          states.forEach((state: any, clientId: number) => {
+              if (clientId === awareness.clientID) return; // Don't render self
+              
+              let cursor = this.remoteCursors.get(clientId);
+              if (!cursor) {
+                  cursor = new Graphics();
+                  // Simple cursor shape
+                  cursor.circle(0, 0, 5);
+                  cursor.fill(state.color || 0xFF0000);
+                  
+                  // Label
+                  const text = new Text({ text: state.name || 'User', style: { fontSize: 12, fill: state.color || 0xFF0000 } });
+                  text.y = 10;
+                  cursor.addChild(text);
+                  
+                  this.cursorContainer.addChild(cursor);
+                  this.remoteCursors.set(clientId, cursor);
+              }
+              
+              if (state.x != null && state.y != null) {
+                  cursor.x = state.x;
+                  cursor.y = state.y;
+                  
+                  // Update color/name if changed
+                  cursor.tint = state.color || 0xFF0000;
+              }
+          });
+      });
   }
 }
 
